@@ -6,6 +6,13 @@ import re
 from datetime import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from collections import Counter
+
+# --- CONFIGURATION ---
+# The ID is the long code in your Google Sheet URL
+SPREADSHEET_ID = "1SGCuphPzqKF9v_lzByO4i-YbC0qEu5G4gHiFM9088ks"
+# The GID is the specific tab ID for your "Sheet 2"
+VARIANT_SHEET_GID = 1000522256
 
 @st.cache_resource
 def get_google_sheet_client():
@@ -15,66 +22,136 @@ def get_google_sheet_client():
     return client
 
 def get_variant_list():
+    """Fetches products from the specific tab (GID: 1000522256)"""
     try:
         client = get_google_sheet_client()
-        sheet = client.open("Cigarette_Data").worksheet("Products")
-        return [x for x in sheet.col_values(1) if x.strip()]
-    except:
-        return ["Marlboro Red", "Manual Entry"]
+        # Open the specific file by ID
+        sh = client.open_by_key(SPREADSHEET_ID)
+        
+        # Find the specific worksheet by its GID
+        worksheet = next((ws for ws in sh.worksheets() if ws.id == VARIANT_SHEET_GID), None)
+        
+        if worksheet:
+            # Get values from Column A (Change col_values(2) if names are in Col B)
+            variants = worksheet.col_values(1)
+            return [x for x in variants if x.strip()]
+        else:
+            return ["Error: Tab not found", "Manual Entry"]
+    except Exception as e:
+        return [f"Connection Error: {e}", "Manual Entry"]
 
 def process_image(image_file):
+    # 1. Read Image
     file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
     img = cv2.imdecode(file_bytes, 1)
+
+    # 2. Pre-processing
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2,2))
     dilation = cv2.dilate(thresh, kernel, iterations=1)
+
+    # 3. OCR Extraction
     custom_config = r'--oem 3 --psm 6'
     text = pytesseract.image_to_string(dilation, config=custom_config)
-    pattern = re.compile(r'\b[A-Z0-9]{3}\s[A-Z0-9]{3}\s[A-Z0-9]{3}\s[A-Z0-9]{3}\b')
-    return pattern.findall(text)
 
+    # 4. Find Dot Codes
+    code_pattern = re.compile(r'\b[A-Z0-9]{3}\s[A-Z0-9]{3}\s[A-Z0-9]{3}\s[A-Z0-9]{3}\b')
+    found_codes = code_pattern.findall(text)
+    
+    # 5. Find Dates (Smart Date Detect)
+    date_pattern = re.compile(r'\b\d{2}/\d{2}/\d{2,4}\b')
+    found_dates = date_pattern.findall(text)
+    
+    detected_date = None
+    if found_dates:
+        detected_date = Counter(found_dates).most_common(1)[0][0]
+
+    return found_codes, detected_date
+
+# --- THE APP INTERFACE ---
 st.title("🚬 Cigarette Scan & Log")
 
-with st.expander("👤 Operator Details", expanded=True):
+# --- SECTION 1: SUPERVISOR DETAILS ---
+with st.expander("👤 Supervisor Details", expanded=True):
     col1, col2 = st.columns(2)
-    emp_name = col1.text_input("Operator Name")
-    emp_code = col2.text_input("Operator Code")
+    with col1:
+        sup_name = st.text_input("Supervisor Name", "Aaron Sasi")
+    with col2:
+        sup_code = st.text_input("Supervisor Code", "SUP-001")
 
+# --- SECTION 2: FWP DETAILS ---
 with st.expander("🚚 Issued To (FWP Details)", expanded=True):
     col3, col4 = st.columns(2)
-    fwp_name = col3.text_input("Issued to FWP Name")
-    fwp_code = col4.text_input("FWP Code")
+    with col3:
+        fwp_name = st.text_input("Issued to FWP Name")
+    with col4:
+        fwp_code = st.text_input("FWP Code")
 
+# --- SECTION 3: PRODUCT DETAILS ---
 with st.expander("📦 Product Details", expanded=True):
-    variant_name = st.selectbox("Variant Name", get_variant_list())
-    sku_code = st.text_input("SKU / Item Code")
-    mfg_date_str = st.date_input("Manufacturing Date").strftime("%d-%m-%Y")
+    # DYNAMIC DROPDOWN from your specific sheet
+    available_variants = get_variant_list()
+    variant_name = st.selectbox("Variant Name", available_variants)
+    
+    sku_code = st.text_input("SKU / Item Code", "SKU-12345")
+    manual_date = st.text_input("Default Mfg Date (Fallback)", "21/08/25")
 
+# --- SECTION 4: SCANNING ---
 st.write("---")
+st.subheader("📷 Scan Packs")
 uploaded_file = st.file_uploader("Take a photo", type=['jpg', 'png', 'jpeg'])
 
-if uploaded_file:
-    st.image(uploaded_file, caption='Uploaded Image')
-    with st.spinner('Reading Dot Codes...'):
-        codes = process_image(uploaded_file)
+if uploaded_file is not None:
+    st.image(uploaded_file, caption='Uploaded Image', use_column_width=True)
     
+    with st.spinner('Reading Codes & Dates...'):
+        codes, detected_mfg_date = process_image(uploaded_file)
+    
+    # Date Logic
+    final_date = manual_date
+    if detected_mfg_date:
+        final_date = detected_mfg_date
+        st.info(f"📅 Smart Date: Detected **{final_date}** on the pack!")
+    else:
+        st.warning(f"📅 No date found on pack. Using manual date: **{final_date}**")
+
     if codes:
         st.success(f"Found {len(codes)} codes!")
-        edited_codes = st.text_area("Verify Scanned Codes", "\n".join(codes), height=150)
+        codes_text = "\n".join(codes)
+        edited_codes = st.text_area("Verify Scanned Codes", codes_text, height=150)
         
         if st.button("Save Data to Sheet"):
             try:
                 client = get_google_sheet_client()
-                sheet = client.open("Cigarette_Data").sheet1 
+                # Open the EXACT same spreadsheet for saving
+                sh = client.open_by_key(SPREADSHEET_ID)
+                # Saving to the FIRST sheet (Index 0) by default
+                sheet = sh.get_worksheet(0)
+                
+                final_code_list = edited_codes.split('\n')
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 
-                for code in edited_codes.split('\n'):
+                for code in final_code_list:
                     if code.strip():
-                        sheet.append_row([timestamp, emp_name, emp_code, fwp_name, fwp_code, variant_name, sku_code, mfg_date_str, code.strip(), uploaded_file.name])
+                        row = [
+                            timestamp,          # A
+                            sup_name,           # B
+                            sup_code,           # C
+                            fwp_name,           # D
+                            fwp_code,           # E
+                            variant_name,       # F
+                            sku_code,           # G
+                            final_date,         # H
+                            code.strip(),       # I
+                            uploaded_file.name  # J
+                        ]
+                        sheet.append_row(row)
+                
                 st.balloons()
-                st.success("Saved successfully!")
+                st.success(f"Saved {len(final_code_list)} entries to Sheet 1!")
+                
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"Error connecting to Google Sheets: {e}")
     else:
-        st.warning("No codes detected.")
+        st.warning("No codes detected. Please try again.")
