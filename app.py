@@ -11,7 +11,7 @@ from collections import Counter
 # --- CONFIGURATION ---
 # The ID is the long code in your Google Sheet URL
 SPREADSHEET_ID = "1SGCuphPzqKF9v_lzByO4i-YbC0qEu5G4gHiFM9088ks"
-# The GID is the specific tab ID for your "Sheet 2"
+# The GID is the specific tab ID for your "Sheet 2" (Variant names)
 VARIANT_SHEET_GID = 1000522256
 
 @st.cache_resource
@@ -22,17 +22,14 @@ def get_google_sheet_client():
     return client
 
 def get_variant_list():
-    """Fetches products from the specific tab (GID: 1000522256)"""
+    """Fetches products from the specific tab (Sheet 2)"""
     try:
         client = get_google_sheet_client()
-        # Open the specific file by ID
         sh = client.open_by_key(SPREADSHEET_ID)
-        
         # Find the specific worksheet by its GID
         worksheet = next((ws for ws in sh.worksheets() if ws.id == VARIANT_SHEET_GID), None)
         
         if worksheet:
-            # Get values from Column A (Change col_values(2) if names are in Col B)
             variants = worksheet.col_values(1)
             return [x for x in variants if x.strip()]
         else:
@@ -90,11 +87,13 @@ with st.expander("🚚 Issued To (FWP Details)", expanded=True):
 
 # --- SECTION 3: PRODUCT DETAILS ---
 with st.expander("📦 Product Details", expanded=True):
-    # DYNAMIC DROPDOWN from your specific sheet
+    # DYNAMIC DROPDOWN for Variant
     available_variants = get_variant_list()
     variant_name = st.selectbox("Variant Name", available_variants)
     
-    sku_code = st.text_input("SKU / Item Code", "SKU-12345")
+    # NEW DROPDOWN for SKU (10's, 20's, 5's)
+    sku_code = st.selectbox("SKU / Pack Size", ["10's", "20's", "5's"])
+    
     manual_date = st.text_input("Default Mfg Date (Fallback)", "21/08/25")
 
 # --- SECTION 4: SCANNING ---
@@ -141,7 +140,7 @@ if uploaded_file is not None:
                             fwp_name,           # D
                             fwp_code,           # E
                             variant_name,       # F
-                            sku_code,           # G
+                            sku_code,           # G (Now saves 10's, 20's, or 5's)
                             final_date,         # H
                             code.strip(),       # I
                             uploaded_file.name  # J
