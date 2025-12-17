@@ -73,7 +73,7 @@ st.title("🚬 Cigarette Scan & Log")
 with st.expander("👤 Supervisor Details", expanded=True):
     col1, col2 = st.columns(2)
     with col1:
-        sup_name = st.text_input("Supervisor Name", "Aaron Sasi")
+        sup_name = st.text_input("Supervisor Name", "Supervisor Name")
     with col2:
         sup_code = st.text_input("Supervisor Code", "SUP-001")
 
