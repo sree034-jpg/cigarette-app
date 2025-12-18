@@ -40,8 +40,6 @@ def process_image(image_file):
     # --- PASS 1: HEAVY DILATION (For Dot Codes) ---
     gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-    
-    # Heavy kernel to connect big dots
     kernel_heavy = cv2.getStructuringElement(cv2.MORPH_RECT, (2,2))
     dilation_heavy = cv2.dilate(thresh, kernel_heavy, iterations=1)
     
@@ -52,27 +50,33 @@ def process_image(image_file):
     code_pattern = re.compile(r'\b[A-Z0-9]{3}\s[A-Z0-9]{3}\s[A-Z0-9]{3}\s[A-Z0-9]{3}\b')
     found_codes = code_pattern.findall(text_heavy)
 
-    # --- PASS 2: LIGHT DILATION (For Dates) ---
-    # Dates are smaller, so heavy dilation blurs them. We use less or no dilation here.
-    # We invert the threshold because dates sometimes read better as black text on white
+    # --- PASS 2: LIGHT TOUCH (For "MFD ON" Dates) ---
+    # We use the original threshold (no dilation) to read small text clearly
     _, thresh_light = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
-    
-    # Run OCR on the cleaner, lighter version
     text_light = pytesseract.image_to_string(thresh_light, config=custom_config)
     
-    # Regex to find dates (Flexible: supports DD/MM/YY, DD.MM.YY, DD-MM-YY, and spaces)
-    # Looks for: 2 digits + separator + 2 digits + separator + 2-4 digits
-    date_pattern = re.compile(r'\b\d{2}[./\-\s]\d{2}[./\-\s]\d{2,4}\b')
-    found_dates = date_pattern.findall(text_light)
+    # Combine texts to search in both
+    full_text = text_light + "\n" + text_heavy
     
-    # Also check the heavy text just in case
-    found_dates += date_pattern.findall(text_heavy)
+    # Regex Strategies for Date
+    found_dates = []
     
-    detected_date = None
+    # Strategy A: Look specifically for "MFD ON" followed by a date
+    # Matches: "MFD ON 21/08/25", "MFD ON: 21.08.25", etc.
+    mfd_pattern = re.compile(r'MFD\s*ON[:\s]*(\d{2}[./\-\s]\d{2}[./\-\s]\d{2,4})', re.IGNORECASE)
+    mfd_matches = mfd_pattern.findall(full_text)
+    found_dates.extend(mfd_matches)
+    
+    # Strategy B: If no "MFD ON" found, look for standalone dates as backup
+    if not found_dates:
+        date_pattern = re.compile(r'\b\d{2}[./\-\s]\d{2}[./\-\s]\d{2,4}\b')
+        found_dates = date_pattern.findall(text_light)
+    
+    detected_date = ""
     if found_dates:
-        # Clean up dates (replace spaces/dots with slashes for consistency)
+        # Normalize date format (replace dots/spaces with slashes)
         clean_dates = [d.replace('.', '/').replace('-', '/').replace(' ', '/') for d in found_dates]
-        # Find the most common date in the batch
+        # Pick the most common one found
         detected_date = Counter(clean_dates).most_common(1)[0][0]
 
     return found_codes, detected_date
@@ -82,7 +86,7 @@ st.title("🚬 Cigarette Scan & Log")
 
 with st.expander("👤 Supervisor Details", expanded=True):
     col1, col2 = st.columns(2)
-    sup_name = col1.text_input("Supervisor Name", "Name")
+    sup_name = col1.text_input("Supervisor Name", "Supervisor's Name")
     sup_code = col2.text_input("Supervisor Code", "SUP-001")
 
 with st.expander("🚚 Issued To (FWP Details)", expanded=True):
@@ -94,7 +98,7 @@ with st.expander("📦 Product Details", expanded=True):
     available_variants = get_variant_list()
     variant_name = st.selectbox("Variant Name", available_variants)
     sku_code = st.selectbox("SKU / Pack Size", ["10's", "20's", "5's"])
-    manual_date = st.text_input("Default Mfg Date (Fallback)", "21/08/25")
+    # DELETED: manual_date fallback is gone.
 
 st.write("---")
 st.subheader("📷 Scan Packs")
@@ -103,40 +107,47 @@ uploaded_file = st.file_uploader("Take a photo", type=['jpg', 'png', 'jpeg'])
 if uploaded_file is not None:
     st.image(uploaded_file, caption='Uploaded Image', use_column_width=True)
     
-    with st.spinner('Scanning (Dual Pass Method)...'):
+    with st.spinner('Scanning for Codes and "MFD ON"...'):
         codes, detected_mfg_date = process_image(uploaded_file)
     
-    # Smart Date Logic
-    final_date = manual_date
-    if detected_mfg_date:
-        final_date = detected_mfg_date
-        st.success(f"📅 **Smart Date Detected:** {final_date}")
-    else:
-        st.warning(f"📅 Could not read date automatically. Using manual: **{final_date}**")
-
+    # --- RESULT SECTION ---
     if codes:
         st.info(f"✅ Found {len(codes)} codes")
+        
+        # 1. DATE VERIFICATION
+        # We show the detected date in an input box. 
+        # If it's correct, user does nothing. If wrong/empty, user types it.
+        final_date = st.text_input("📅 Manufacturing Date (Verify)", value=detected_mfg_date, help="App reads this from 'MFD ON'. Edit if incorrect.")
+        
+        if not final_date:
+            st.warning("⚠️ No 'MFD ON' date detected. Please type the date manually above before saving.")
+
+        # 2. CODE VERIFICATION
         codes_text = "\n".join(codes)
         edited_codes = st.text_area("Verify Scanned Codes", codes_text, height=150)
         
+        # 3. SAVE BUTTON
         if st.button("Save Data to Sheet"):
-            try:
-                client = get_google_sheet_client()
-                sh = client.open_by_key(SPREADSHEET_ID)
-                sheet = sh.get_worksheet(0)
-                
-                final_code_list = edited_codes.split('\n')
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
-                for code in final_code_list:
-                    if code.strip():
-                        row = [timestamp, sup_name, sup_code, fwp_name, fwp_code, variant_name, sku_code, final_date, code.strip(), uploaded_file.name]
-                        sheet.append_row(row)
-                
-                st.balloons()
-                st.success(f"Saved {len(final_code_list)} entries!")
-                
-            except Exception as e:
-                st.error(f"Error connecting to Google Sheets: {e}")
+            if not final_date:
+                st.error("❌ Cannot save: Manufacturing Date is empty.")
+            else:
+                try:
+                    client = get_google_sheet_client()
+                    sh = client.open_by_key(SPREADSHEET_ID)
+                    sheet = sh.get_worksheet(0)
+                    
+                    final_code_list = edited_codes.split('\n')
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    for code in final_code_list:
+                        if code.strip():
+                            row = [timestamp, sup_name, sup_code, fwp_name, fwp_code, variant_name, sku_code, final_date, code.strip(), uploaded_file.name]
+                            sheet.append_row(row)
+                    
+                    st.balloons()
+                    st.success(f"Saved {len(final_code_list)} entries with Date: {final_date}")
+                    
+                except Exception as e:
+                    st.error(f"Error connecting to Google Sheets: {e}")
     else:
         st.warning("No codes detected. Please try a clearer photo.")
