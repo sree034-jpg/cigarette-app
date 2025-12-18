@@ -36,57 +36,58 @@ def process_image(image_file):
     # 1. Read Image
     file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
     original_img = cv2.imdecode(file_bytes, 1)
-    
-    # --- PASS 1: HEAVY DILATION (For Dot Codes) ---
     gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-    kernel_heavy = cv2.getStructuringElement(cv2.MORPH_RECT, (2,2))
-    dilation_heavy = cv2.dilate(thresh, kernel_heavy, iterations=1)
+    
+    all_found_codes = set()
+    all_found_dates = []
     
     custom_config = r'--oem 3 --psm 6'
-    text_heavy = pytesseract.image_to_string(dilation_heavy, config=custom_config)
     
-    # Find Codes
-    code_pattern = re.compile(r'\b[A-Z0-9]{3}\s[A-Z0-9]{3}\s[A-Z0-9]{3}\s[A-Z0-9]{3}\b')
-    found_codes = code_pattern.findall(text_heavy)
+    # --- MULTI-PASS STRATEGY ---
+    passes = [
+        ("Original", gray), 
+        ("Threshold", cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)[1]), 
+        ("Light Dilation", cv2.dilate(cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)[1], cv2.getStructuringElement(cv2.MORPH_RECT, (1,1)), iterations=1)),
+        ("Heavy Dilation", cv2.dilate(cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)[1], cv2.getStructuringElement(cv2.MORPH_RECT, (2,2)), iterations=1))
+    ]
+    
+    for pass_name, processed_img in passes:
+        text = pytesseract.image_to_string(processed_img, config=custom_config)
+        
+        # Find Codes
+        code_pattern = re.compile(r'\b[A-Z0-9]{3}\s[A-Z0-9]{3}\s[A-Z0-9]{3}\s[A-Z0-9]{3}\b')
+        all_found_codes.update(code_pattern.findall(text))
+        
+        # Find Dates (Looks for "MFD ON" or just standard date formats)
+        # 1. Look for explicit "MFD ON"
+        mfd_pattern = re.compile(r'MFD\.?\s*ON[:\s]*(\d{2}[./\-\s]\d{2}[./\-\s]\d{2,4})', re.IGNORECASE)
+        matches = mfd_pattern.findall(text)
+        
+        # 2. If no MFD tag, look for loose dates like 18/11/25
+        if not matches:
+             loose_date_pattern = re.compile(r'\b\d{2}[/]\d{2}[/]\d{2,4}\b')
+             matches = loose_date_pattern.findall(text)
+             
+        all_found_dates.extend(matches)
 
-    # --- PASS 2: LIGHT TOUCH (For "MFD ON" Dates) ---
-    # We use the original threshold (no dilation) to read small text clearly
-    _, thresh_light = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
-    text_light = pytesseract.image_to_string(thresh_light, config=custom_config)
-    
-    # Combine texts to search in both
-    full_text = text_light + "\n" + text_heavy
-    
-    # Regex Strategies for Date
-    found_dates = []
-    
-    # Strategy A: Look specifically for "MFD ON" followed by a date
-    # Matches: "MFD ON 21/08/25", "MFD ON: 21.08.25", etc.
-    mfd_pattern = re.compile(r'MFD\s*ON[:\s]*(\d{2}[./\-\s]\d{2}[./\-\s]\d{2,4})', re.IGNORECASE)
-    mfd_matches = mfd_pattern.findall(full_text)
-    found_dates.extend(mfd_matches)
-    
-    # Strategy B: If no "MFD ON" found, look for standalone dates as backup
-    if not found_dates:
-        date_pattern = re.compile(r'\b\d{2}[./\-\s]\d{2}[./\-\s]\d{2,4}\b')
-        found_dates = date_pattern.findall(text_light)
+    # --- FINALIZE RESULTS ---
+    final_codes = sorted(list(all_found_codes))
     
     detected_date = ""
-    if found_dates:
-        # Normalize date format (replace dots/spaces with slashes)
-        clean_dates = [d.replace('.', '/').replace('-', '/').replace(' ', '/') for d in found_dates]
-        # Pick the most common one found
+    if all_found_dates:
+        # Normalize: replace dots/spaces with slashes
+        clean_dates = [d.replace('.', '/').replace('-', '/').replace(' ', '/') for d in all_found_dates]
+        # Pick the most common one
         detected_date = Counter(clean_dates).most_common(1)[0][0]
 
-    return found_codes, detected_date
+    return final_codes, detected_date
 
 # --- THE APP INTERFACE ---
 st.title("🚬 Cigarette Scan & Log")
 
 with st.expander("👤 Supervisor Details", expanded=True):
     col1, col2 = st.columns(2)
-    sup_name = col1.text_input("Supervisor Name", "Supervisor's Name")
+    sup_name = col1.text_input("Supervisor Name", "Aaron Sasi")
     sup_code = col2.text_input("Supervisor Code", "SUP-001")
 
 with st.expander("🚚 Issued To (FWP Details)", expanded=True):
@@ -98,7 +99,6 @@ with st.expander("📦 Product Details", expanded=True):
     available_variants = get_variant_list()
     variant_name = st.selectbox("Variant Name", available_variants)
     sku_code = st.selectbox("SKU / Pack Size", ["10's", "20's", "5's"])
-    # DELETED: manual_date fallback is gone.
 
 st.write("---")
 st.subheader("📷 Scan Packs")
@@ -107,29 +107,35 @@ uploaded_file = st.file_uploader("Take a photo", type=['jpg', 'png', 'jpeg'])
 if uploaded_file is not None:
     st.image(uploaded_file, caption='Uploaded Image', use_column_width=True)
     
-    with st.spinner('Scanning for Codes and "MFD ON"...'):
+    with st.spinner('Scanning...'):
         codes, detected_mfg_date = process_image(uploaded_file)
     
-    # --- RESULT SECTION ---
     if codes:
-        st.info(f"✅ Found {len(codes)} codes")
+        st.success(f"✅ Found {len(codes)} unique codes")
         
-        # 1. DATE VERIFICATION
-        # We show the detected date in an input box. 
-        # If it's correct, user does nothing. If wrong/empty, user types it.
-        final_date = st.text_input("📅 Manufacturing Date (Verify)", value=detected_mfg_date, help="App reads this from 'MFD ON'. Edit if incorrect.")
+        # --- DATE HANDLING LOGIC ---
+        # 1. Determine what to put in the box (Detected Date OR Empty)
+        default_date_val = detected_mfg_date if detected_mfg_date else ""
         
-        if not final_date:
-            st.warning("⚠️ No 'MFD ON' date detected. Please type the date manually above before saving.")
+        # 2. Show the input box
+        # If auto-detected, it is pre-filled. If not, it is empty. User can edit both.
+        final_date = st.text_input("📅 Manufacturing Date", value=default_date_val, placeholder="DD/MM/YY (e.g. 18/11/25)")
+        
+        # 3. Helper Message
+        if detected_mfg_date:
+            st.caption("✨ Auto-detected from pack. You can edit above if incorrect.")
+        else:
+            st.warning("⚠️ Date not detected. Please type it manually above.")
 
-        # 2. CODE VERIFICATION
+        # --- CODE VERIFICATION ---
         codes_text = "\n".join(codes)
         edited_codes = st.text_area("Verify Scanned Codes", codes_text, height=150)
         
-        # 3. SAVE BUTTON
+        # --- SAVE BUTTON ---
         if st.button("Save Data to Sheet"):
-            if not final_date:
-                st.error("❌ Cannot save: Manufacturing Date is empty.")
+            # Validation: We only block saving if the box is COMPLETELY empty
+            if not final_date.strip():
+                st.error("❌ Please enter a Manufacturing Date before saving.")
             else:
                 try:
                     client = get_google_sheet_client()
@@ -145,9 +151,9 @@ if uploaded_file is not None:
                             sheet.append_row(row)
                     
                     st.balloons()
-                    st.success(f"Saved {len(final_code_list)} entries with Date: {final_date}")
+                    st.success(f"Saved {len(final_code_list)} entries! (Date: {final_date})")
                     
                 except Exception as e:
                     st.error(f"Error connecting to Google Sheets: {e}")
     else:
-        st.warning("No codes detected. Please try a clearer photo.")
+        st.error("❌ No codes found. Please try again.")
